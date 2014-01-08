@@ -1,88 +1,81 @@
 #!/usr/bin/env python
 
 import argparse
+import codecs
 import plistlib
 import sqlite3
 import sys
 
-def parse_args(argv):
-    if argv is None:
-        argv = sys.argv[1:]
-
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument('filenames',
-                        metavar='FILE',
-                        nargs='+',
-                        help="input filenames")
-    return parser.parse_args(argv)
+PREFIX_TO_TYPE = {
+    'appActivationCount.': 'activations',
+    'appActiveTime.': 'active time',
+    'appBackgroundActiveTime.': 'background active time',
+    'appLaunchCount.': 'launches',
+}
 
 def create_schema(db):
     sql = """
-    CREATE TABLE IF NOT EXISTS active_time (
-        date, label, duration, UNIQUE (date, label) ON CONFLICT REPLACE
+    CREATE TABLE IF NOT EXISTS stats (
+        date TEXT,
+        type TEXT,
+        name TEXT,
+        value INTEGER,
+        UNIQUE (type, name, date) ON CONFLICT REPLACE
     );
 
-    CREATE TABLE IF NOT EXISTS background_active_time (
-        date, label, duration, UNIQUE (date, label) ON CONFLICT REPLACE
-    );
-
-    CREATE TABLE IF NOT EXISTS activations (
-        date, label, count, UNIQUE (date, label) ON CONFLICT REPLACE
-    );
-
-    CREATE TABLE IF NOT EXISTS launches (
-        date, label, count, UNIQUE (date, label) ON CONFLICT REPLACE
+    CREATE TABLE IF NOT EXISTS plists (
+        filename TEXT,
+        content TEXT,
+        UNIQUE (filename) ON CONFLICT REPLACE
     );
 
     DROP VIEW IF EXISTS total_active_time;
     CREATE VIEW total_active_time AS
-        SELECT label, SUM(duration) AS duration
-        FROM active_time
-        GROUP BY label
-        ORDER BY duration DESC;
+        SELECT name, SUM(value) AS duration
+        FROM stats
+        WHERE type = 'active time'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
 
     DROP VIEW IF EXISTS total_background_active_time;
     CREATE VIEW total_background_active_time AS
-        SELECT label, SUM(duration) AS duration
-        FROM background_active_time
-        GROUP BY label
-        ORDER BY duration DESC;
+        SELECT name, SUM(value) AS duration
+        FROM stats
+        WHERE type = 'background active time'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
 
     DROP VIEW IF EXISTS total_activations;
     CREATE VIEW total_activations AS
-        SELECT label, SUM(count) AS count
-        FROM activations
-        GROUP BY label
-        ORDER BY count DESC;
+        SELECT name, SUM(value) AS count
+        FROM stats
+        WHERE type = 'activations'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
 
     DROP VIEW IF EXISTS total_launches;
     CREATE VIEW total_launches AS
-        SELECT label, SUM(count) AS count
-        FROM launches
-        GROUP BY label
-        ORDER BY count DESC;
+        SELECT name, SUM(value) AS count
+        FROM stats
+        WHERE type = 'launches'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
 
     DROP VIEW IF EXISTS activations_and_launches;
     CREATE VIEW activations_and_launches AS
-        SELECT label, SUM(count) AS count
-        FROM (
-            SELECT * FROM activations
-            UNION ALL
-            SELECT * FROM launches
-        )
-        GROUP BY label
-        ORDER BY count DESC;
+        SELECT name, SUM(value) AS count
+        FROM stats
+        WHERE type = 'launches' OR type = 'activations'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
 
     DROP VIEW IF EXISTS total_time;
     CREATE VIEW total_time AS
-        SELECT label, SUM(duration) AS duration
-        FROM (
-            SELECT * FROM total_active_time
-            UNION ALL
-            SELECT * FROM total_background_active_time
-        )
-        GROUP BY label
-        ORDER BY duration DESC;
+        SELECT name, SUM(value) AS count
+        FROM stats
+        WHERE type = 'active time' OR type = 'background active time'
+        GROUP BY name
+        ORDER BY SUM(value) DESC;
     """
 
     db.executescript(sql)
@@ -94,40 +87,55 @@ def string_without_prefix(string, prefix):
     else:
         return string
 
-def update_database(db, plist_filename):
-    plist = plistlib.readPlist(plist_filename)
-    date = plist['ADStartDate']
+def update_database(db, plist_string):
+    plist = plistlib.readPlistFromString(plist_string)
 
+    start_date = plist['ADStartDate']
+    create_date = plist['ADLogCreationDate']
+
+    plist_filename = 'log-aggregated-%s.plist' % create_date.strftime('%Y-%m-%d-%H%M%S')
     print plist_filename
-    print 'Start Date:       ', date, '(UTC)'
-    print 'Log Creation Date:', plist['ADLogCreationDate'], '(UTC)'
+
+    print 'Start Date:       ', start_date, '(UTC)'
+    print 'Log Creation Date:', create_date, '(UTC)'
     print
-
-    prefix_to_sql = {
-        'appActivationCount.':
-        'INSERT INTO activations (date, label, count) VALUES (?, ?, ?);',
-
-        'appActiveTime.' :
-        'INSERT INTO active_time (date, label, duration) VALUES (?, ?, ?);',
-
-        'appBackgroundActiveTime.' :
-        'INSERT INTO background_active_time (date, label, duration) VALUES (?, ?, ?);',
-
-        'appLaunchCount.' :
-        'INSERT INTO launches (date, label, count) VALUES (?, ?, ?);',
-    }
 
     scalars = plist['ADScalars']
     c = db.cursor()
 
+    sql = 'INSERT INTO plists (filename, content) VALUES (?, ?);'
+    c.execute(sql, (plist_filename, plist_string))
+
+    sql = 'INSERT INTO stats (date, type, name, value) VALUES (?, ?, ?, ?);'
+
     for key, value in scalars.iteritems():
-        for prefix, sql in prefix_to_sql.iteritems():
+        for prefix, typ in PREFIX_TO_TYPE.iteritems():
             if key.startswith(prefix):
-                label = string_without_prefix(key, prefix)
-                c.execute(sql, (date, label, value))
+                name = string_without_prefix(key, prefix)
+                c.execute(sql, (start_date, typ, name, value))
 
     c.close()
     db.commit()
+
+def update_database_from_clipboard(db):
+    try:
+        import clipboard
+    except ImportError:
+        return
+
+    plist_string = clipboard.get()
+    update_database(db, plist_string)
+
+def parse_args(argv):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument('filenames',
+                        metavar='FILE',
+                        nargs='*',
+                        help="input filenames")
+    return parser.parse_args(argv)
 
 def main(argv=None):
     options = parse_args(argv)
@@ -135,10 +143,17 @@ def main(argv=None):
     db = sqlite3.connect('log_aggregated.sqlite3')
     create_schema(db)
 
-    for filename in options.filenames:
-        update_database(db, filename)
+    try:
+        if options.filenames:
+            for filename in options.filenames:
+                with codecs.open(filename, 'r', 'utf-8') as fh:
+                    plist_string = fh.read()
+                    update_database(db, plist_string)
+        else:
+            update_database_from_clipboard(db)
 
-    db.close()
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     sys.exit(main())
