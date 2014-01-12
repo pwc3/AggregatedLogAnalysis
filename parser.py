@@ -3,6 +3,7 @@
 import argparse
 import codecs
 import plistlib
+import socket
 import sqlite3
 import sys
 
@@ -140,7 +141,8 @@ def parse_args(argv):
 def main(argv=None):
     options = parse_args(argv)
 
-    db = sqlite3.connect('log_aggregated.sqlite3')
+    hostname = socket.gethostname().replace(' ', '_')
+    db = sqlite3.connect('%s_log_aggregated.sqlite3' % hostname)
     create_schema(db)
 
     try:
@@ -156,4 +158,4 @@ def main(argv=None):
         db.close()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
